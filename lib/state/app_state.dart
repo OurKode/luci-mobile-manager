@@ -856,6 +856,7 @@ class AppState extends ChangeNotifier {
           'uciWirelessConfig': results[6][1],
           'wan': _extractWanData(interfaceDump),
           'wireguard': <String, dynamic>{}, // Empty for reviewer mode
+          'cpuTemperature': 48.5,
           '_lastUpdated':
               DateTime.now().millisecondsSinceEpoch, // Force UI updates
         };
@@ -986,6 +987,13 @@ class AppState extends ChangeNotifier {
         params: {'config': 'wireless'},
       );
 
+      // Thermal reading is optional — routers without sensors or rpcd-mod-file return null
+      final thermalFuture = callOptionalRpc(
+        object: 'file',
+        method: 'read',
+        params: {'path': '/sys/class/thermal/thermal_zone0/temp'},
+      );
+
       final results = await Future.wait([
         _apiService!.call(
           ip,
@@ -1061,10 +1069,11 @@ class AppState extends ChangeNotifier {
       final interfaceDump = getData(results[3]) as Map<String, dynamic>?;
       final dhcpLeases = getData(results[4]) as Map<String, dynamic>?;
 
-      // Await optional wireless futures in parallel (won't throw — wired-only routers are fine)
+      // Await optional wireless and thermal futures in parallel (won't throw — optional features degrade gracefully)
       final optionalResults = await Future.wait([
         wirelessFuture,
         uciWirelessFuture,
+        thermalFuture,
       ]);
       if (unanswered && !resentUnanswered) {
         if (token != _sessionToken) return;
@@ -1076,6 +1085,7 @@ class AppState extends ChangeNotifier {
       }
       final wirelessRaw = optionalResults[0];
       final uciWirelessRaw = optionalResults[1];
+      final thermalRaw = optionalResults.length > 2 ? optionalResults[2] : null;
 
       Map<String, dynamic>? wirelessData;
       if (wirelessRaw != null) {
@@ -1091,6 +1101,15 @@ class AppState extends ChangeNotifier {
       dynamic uciWirelessConfig;
       if (uciWirelessRaw != null) {
         uciWirelessConfig = getOptionalData(uciWirelessRaw, 'uci.get wireless');
+      }
+
+      double? genericCpuTemp;
+      if (thermalRaw != null) {
+        final parsedThermal = getOptionalData(
+          thermalRaw,
+          'file.read thermal_zone0',
+        );
+        genericCpuTemp = _parseThermalData(parsedThermal);
       }
 
       // Fetch WireGuard peer information for WireGuard interfaces
@@ -1216,6 +1235,7 @@ class AppState extends ChangeNotifier {
         'uciWirelessConfig': uciWirelessConfig,
         'wireguard': wireguardData,
         'glinet': ?glInetData,
+        'cpuTemperature': glInetData?.cpuTemperature ?? genericCpuTemp,
         '_lastUpdated':
             DateTime.now().millisecondsSinceEpoch, // Force UI updates
       };
@@ -3285,6 +3305,27 @@ class AppState extends ChangeNotifier {
     if (model.contains('MT6000') || model.contains('B2200')) return 4;
     if (model.contains('MT3000') || model.contains('MT2500')) return 2;
     return null;
+  }
+
+  /// Parses thermal sensor output from sysfs (e.g. `/sys/class/thermal/thermal_zone0/temp`).
+  /// Standard Linux thermal sysfs outputs in millidegrees Celsius (e.g. 52000 -> 52.0°C).
+  static double? _parseThermalData(dynamic data) {
+    String? raw;
+    if (data is Map) {
+      raw = data['data']?.toString().trim();
+    } else if (data is String) {
+      raw = data.trim();
+    } else if (data is num) {
+      final val = data.toDouble();
+      return val >= 1000 ? val / 1000.0 : val;
+    }
+    if (raw == null || raw.isEmpty) return null;
+    final value = double.tryParse(raw);
+    if (value == null || value <= 0) return null;
+    if (value >= 1000) {
+      return value / 1000.0;
+    }
+    return value;
   }
 
   /// Enrich client map with GL.iNet API data (band, online, device class).

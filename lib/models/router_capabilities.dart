@@ -35,7 +35,7 @@ enum RouterFeature {
   /// `luci.getRealtimeStats` — load/traffic/conntrack series.
   realtimeStats,
 
-  /// Per-client traffic accounting (nlbwmon).
+  /// Per-client traffic monitoring (Bandix).
   trafficAccounting,
 
   sqm,
@@ -116,6 +116,7 @@ class RouterCapabilities {
     this.features = const <String, dynamic>{},
     this.ubusAcl,
     this.unprobedFunctions = const <String>{},
+    this.bandixAvailable = false,
     this.probeFailed = false,
     this.probedAt,
   });
@@ -126,6 +127,9 @@ class RouterCapabilities {
   /// Every config present on the router (`uci.configs`). A cheap proxy for
   /// "is this package installed".
   final Set<String> uciConfigs;
+
+  /// Whether the Bandix REST backend responded on port 8686.
+  final bool bandixAvailable;
 
   /// The raw `luci.getFeatures` map (`firewall4`, `ipv6`, `wifi`, `opkg`, …).
   final Map<String, dynamic> features;
@@ -282,7 +286,10 @@ class RouterCapabilities {
         return _requireUbus('luci', const ['getRealtimeStats']);
 
       case RouterFeature.trafficAccounting:
-        return _requireConfig('nlbwmon', 'nlbwmon');
+        if (bandixAvailable || uciConfigs.contains('bandix')) {
+          return const FeatureAvailability.available();
+        }
+        return _requireConfig('bandix', 'luci-app-bandix');
       case RouterFeature.sqm:
         return _requireConfig('sqm', 'sqm-scripts', write: true);
       case RouterFeature.ddns:
@@ -332,6 +339,7 @@ class RouterCapabilities {
     Map<String, dynamic>? features,
     Map<String, Set<String>>? ubusAcl,
     Set<String>? unprobedFunctions,
+    bool? bandixAvailable,
     bool? probeFailed,
     DateTime? probedAt,
   }) => RouterCapabilities(
@@ -339,6 +347,7 @@ class RouterCapabilities {
     features: features ?? this.features,
     ubusAcl: ubusAcl ?? this.ubusAcl,
     unprobedFunctions: unprobedFunctions ?? this.unprobedFunctions,
+    bandixAvailable: bandixAvailable ?? this.bandixAvailable,
     probeFailed: probeFailed ?? this.probeFailed,
     probedAt: probedAt ?? this.probedAt,
   );

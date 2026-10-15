@@ -141,6 +141,6 @@ class AddonCatalog {
     Addon.adblock => RouterFeature.adblock,
     Addon.upnp => RouterFeature.upnp,
     Addon.ddns => RouterFeature.ddns,
-    Addon.nlbwmon => RouterFeature.trafficAccounting,
+    Addon.bandix => RouterFeature.trafficAccounting,
   };
 }

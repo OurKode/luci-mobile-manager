@@ -70,7 +70,7 @@ void main() {
 
       expect(
         caps.of(RouterFeature.trafficAccounting).requiredPackage,
-        'nlbwmon',
+        'luci-app-bandix',
       );
       expect(caps.of(RouterFeature.adblock).requiredPackage, 'adblock');
       expect(caps.of(RouterFeature.upnp).requiredPackage, 'miniupnpd');
@@ -78,7 +78,7 @@ void main() {
 
     test('installed optional packages become available', () {
       final caps = _stock(
-        configs: const {'dhcp', 'firewall', 'network', 'sqm', 'nlbwmon'},
+        configs: const {'dhcp', 'firewall', 'network', 'sqm', 'bandix'},
       );
       expect(caps.of(RouterFeature.sqm).available, isTrue);
       expect(caps.of(RouterFeature.trafficAccounting).available, isTrue);

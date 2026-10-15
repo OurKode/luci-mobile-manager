@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 
 /// Which add-on a screen is for. Also the key the capability gate and the
 /// hub tile are looked up by.
-enum Addon { sqm, adblock, upnp, ddns, nlbwmon }
+enum Addon { sqm, adblock, upnp, ddns, bandix }
 
 /// How one UCI option is presented.
 ///

@@ -719,7 +719,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ? '${(usedMem / totalMem * 100).toStringAsFixed(0)}%'
         : 'N/A';
 
-    final cpuTemp = glInetData?.cpuTemperature;
+    final cpuTemp = glInetData?.cpuTemperature ??
+        (appState.dashboardData?['cpuTemperature'] as num?)?.toDouble();
     final fanActive = glInetData?.fanActive;
     final fanSpeed = glInetData?.fanSpeed;
 

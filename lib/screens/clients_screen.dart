@@ -12,7 +12,6 @@ import 'package:luci_mobile/widgets/luci_app_bar.dart';
 import 'package:luci_mobile/design/luci_design_system.dart';
 import 'package:luci_mobile/widgets/luci_loading_states.dart';
 import 'package:luci_mobile/widgets/luci_refresh_components.dart';
-import 'package:luci_mobile/widgets/luci_animation_system.dart';
 import 'package:luci_mobile/l10n/luci_localizations.dart';
 
 class ClientsScreen extends ConsumerStatefulWidget {
@@ -128,11 +127,14 @@ class _ClientsScreenState extends ConsumerState<ClientsScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final watchedAppState = ref.watch(appStateProvider);
+    final currentId = ref.watch(
+      appStateProvider.select((s) => s.selectedRouter?.id),
+    );
+    final routerCount = ref.watch(
+      appStateProvider.select((s) => s.routers.length),
+    );
     // Recompute future only when selected router changes
     Future<List<Client>>? future = _clientsFuture;
-    final currentId = watchedAppState.selectedRouter?.id;
-    final routerCount = watchedAppState.routers.length;
     if (currentId != _lastSelectedRouterId || routerCount != _lastRouterCount) {
       _lastSelectedRouterId = currentId;
       _lastRouterCount = routerCount;
@@ -158,11 +160,12 @@ class _ClientsScreenState extends ConsumerState<ClientsScreen> {
                 },
                 child: Builder(
                   builder: (context) {
-                    final appState = ref.watch(appStateProvider);
+                    final failure = ref.watch(
+                      appStateProvider.select((s) => s.appFailure),
+                    );
                     final isLoading =
                         snapshot.connectionState == ConnectionState.waiting &&
                         (aggregatedClients.isEmpty);
-                    final failure = appState.appFailure;
                     final dashboardError = failure == null
                         ? null
                         : appFailureText(context, failure);
@@ -339,41 +342,38 @@ class _ClientsScreenState extends ConsumerState<ClientsScreen> {
                                     final isExpanded = _expandedClientKeys
                                         .contains(clientKey);
 
-                                    return LuciSlideTransition(
-                                      direction: LuciSlideDirection.up,
-                                      delay: Duration(milliseconds: index * 50),
-                                      distance: 30,
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 16.0,
-                                          vertical: 8.0,
-                                        ),
-                                        child: _UnifiedClientCard(
-                                          client: client,
-                                          isExpanded: isExpanded,
-                                          onTap: () {
-                                            setState(() {
-                                              if (isExpanded) {
-                                                _expandedClientKeys.remove(
-                                                  clientKey,
-                                                );
-                                              } else {
-                                                _expandedClientKeys.add(
-                                                  clientKey,
-                                                );
-                                              }
-                                            });
-                                          },
-                                          onOpenDetails: () =>
-                                              Navigator.of(context).push(
-                                                MaterialPageRoute(
-                                                  builder: (_) =>
-                                                      ClientDetailScreen(
-                                                        client: client,
-                                                      ),
-                                                ),
+                                    return Padding(
+                                      key: ValueKey(clientKey),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16.0,
+                                        vertical: 8.0,
+                                      ),
+                                      child: _UnifiedClientCard(
+                                        key: ValueKey('card_$clientKey'),
+                                        client: client,
+                                        isExpanded: isExpanded,
+                                        onTap: () {
+                                          setState(() {
+                                            if (isExpanded) {
+                                              _expandedClientKeys.remove(
+                                                clientKey,
+                                              );
+                                            } else {
+                                              _expandedClientKeys.add(
+                                                clientKey,
+                                              );
+                                            }
+                                          });
+                                        },
+                                        onOpenDetails: () =>
+                                            Navigator.of(context).push(
+                                              MaterialPageRoute(
+                                                builder: (_) =>
+                                                    ClientDetailScreen(
+                                                      client: client,
+                                                    ),
                                               ),
-                                        ),
+                                            ),
                                       ),
                                     );
                                   },
@@ -399,6 +399,7 @@ class _UnifiedClientCard extends StatefulWidget {
   final VoidCallback onOpenDetails;
 
   const _UnifiedClientCard({
+    super.key,
     required this.client,
     required this.isExpanded,
     required this.onTap,

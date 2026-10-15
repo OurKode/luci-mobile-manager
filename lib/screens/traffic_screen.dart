@@ -1,41 +1,42 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:luci_mobile/l10n/failure_text.dart';
 import 'package:luci_mobile/design/luci_design_system.dart';
+import 'package:luci_mobile/l10n/failure_text.dart';
 import 'package:luci_mobile/l10n/luci_localizations.dart';
+import 'package:luci_mobile/models/bandix_device.dart';
 import 'package:luci_mobile/models/router_capabilities.dart';
-import 'package:luci_mobile/services/traffic_service.dart';
+import 'package:luci_mobile/services/bandix_service.dart';
 import 'package:luci_mobile/state/app_state_provider.dart';
 import 'package:luci_mobile/state/feature_providers.dart';
+import 'package:luci_mobile/utils/format_bytes.dart';
 import 'package:luci_mobile/widgets/luci_app_bar.dart';
 import 'package:luci_mobile/widgets/luci_feature_gate.dart';
 import 'package:luci_mobile/widgets/luci_loading_states.dart';
-import 'package:luci_mobile/utils/format_bytes.dart';
 
-final trafficServiceProvider = Provider<TrafficService?>((ref) {
-  final api = ref.watch(apiServiceProvider);
-  return api == null ? null : TrafficService(api);
+final bandixServiceProvider = Provider<BandixService>((ref) {
+  return BandixService();
 });
 
-final trafficPeriodsProvider = FutureProvider<List<String>>((ref) async {
+final bandixSnapshotProvider = FutureProvider<BandixSnapshot>((ref) async {
   final session = ref.watch(sessionProvider);
-  final service = ref.watch(trafficServiceProvider);
-  if (session == null || service == null) return const [];
-  return service.periods(session);
+  final service = ref.watch(bandixServiceProvider);
+  final api = ref.watch(apiServiceProvider);
+  if (session == null) {
+    return BandixSnapshot(
+      metrics: const BandixMetrics(),
+      devices: const [],
+      timestamp: DateTime.now(),
+    );
+  }
+  return service.fetchSnapshot(session, api: api);
 }, retry: (_, _) => null);
 
-final trafficRecordsProvider = FutureProvider.family<List<TrafficRow>, String>((
-  ref,
-  period,
-) async {
-  final session = ref.watch(sessionProvider);
-  final service = ref.watch(trafficServiceProvider);
-  if (session == null || service == null) return const [];
-  return service.records(session, period);
-}, retry: (_, _) => null);
+enum BandixSortMode { liveSpeed, totalTraffic }
 
-/// Which devices used the connection, from nlbwmon's accounting database.
+/// Real-time bandwidth monitoring screen powered by Bandix on port 8686.
 class TrafficScreen extends ConsumerStatefulWidget {
   const TrafficScreen({super.key});
 
@@ -44,43 +45,162 @@ class TrafficScreen extends ConsumerStatefulWidget {
 }
 
 class _TrafficScreenState extends ConsumerState<TrafficScreen> {
-  String? _period;
+  Timer? _pollingTimer;
+  BandixSortMode _sortMode = BandixSortMode.liveSpeed;
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(() {
+      if (_searchQuery != _searchController.text) {
+        setState(() => _searchQuery = _searchController.text);
+      }
+    });
+
+    // Auto-refresh bandwidth stats every 2 seconds while this screen is active
+    _pollingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      ref.invalidate(bandixSnapshotProvider);
+    });
+  }
+
+  @override
+  void dispose() {
+    _pollingTimer?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final gate = ref.watch(featureProvider(RouterFeature.trafficAccounting));
-    final periods = ref.watch(trafficPeriodsProvider);
+    final snapshotAsync = ref.watch(bandixSnapshotProvider);
 
     return Scaffold(
       appBar: LuciAppBar(title: l10n.trafficHistory, showBack: true),
       body: RefreshIndicator(
-        onRefresh: () async {
-          ref.invalidate(trafficPeriodsProvider);
-          final p = _period;
-          if (p != null) ref.invalidate(trafficRecordsProvider(p));
-        },
-        child: periods.when(
+        onRefresh: () async => ref.invalidate(bandixSnapshotProvider),
+        child: snapshotAsync.when(
+          skipLoadingOnReload: true,
+          skipLoadingOnRefresh: true,
           loading: () => const Padding(
             padding: EdgeInsets.all(LuciSpacing.md),
-            child: LuciCardSkeleton(contentLines: 5),
+            child: Column(
+              children: [
+                LuciCardSkeleton(contentLines: 3),
+                SizedBox(height: LuciSpacing.md),
+                Expanded(child: LuciCardSkeleton(contentLines: 6)),
+              ],
+            ),
           ),
           error: (error, _) => LuciMessageState(
             message: gate.explain(context) ?? apiErrorText(context, error),
             action: l10n.retry,
-            onAction: () => ref.invalidate(trafficPeriodsProvider),
+            onAction: () => ref.invalidate(bandixSnapshotProvider),
           ),
-          data: (list) {
-            if (list.isEmpty) {
-              return LuciMessageState(
-                message: gate.explain(context) ?? l10n.trafficNoPeriods,
-              );
-            }
-            final period = list.contains(_period) ? _period! : list.first;
-            return _Records(
-              periods: list,
-              period: period,
-              onPeriod: (p) => setState(() => _period = p),
+          data: (snapshot) {
+            final filteredDevices = snapshot.devices.where((d) {
+              if (_searchQuery.isEmpty) return true;
+              final q = _searchQuery.toLowerCase();
+              return d.ip.toLowerCase().contains(q) ||
+                  d.mac.toLowerCase().contains(q) ||
+                  (d.hostname != null && d.hostname!.toLowerCase().contains(q));
+            }).toList();
+
+            filteredDevices.sort((a, b) {
+              if (_sortMode == BandixSortMode.liveSpeed) {
+                return b.totalRate.compareTo(a.totalRate);
+              } else {
+                return b.totalBytes.compareTo(a.totalBytes);
+              }
+            });
+
+            return Column(
+              children: [
+                // Top WAN Bandwidth Summary Card
+                _WanMetricsHeader(metrics: snapshot.metrics),
+                // Search & Sort Bar
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: LuciSpacing.md,
+                    vertical: LuciSpacing.xs,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _searchController,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            hintText: l10n.clientSearchHint,
+                            prefixIcon: const Icon(Icons.search, size: 20),
+                            suffixIcon: _searchQuery.isNotEmpty
+                                ? IconButton(
+                                    icon: const Icon(Icons.clear, size: 18),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      setState(() => _searchQuery = '');
+                                    },
+                                    tooltip: l10n.clearSearch,
+                                  )
+                                : null,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                            filled: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: LuciSpacing.sm),
+                      SegmentedButton<BandixSortMode>(
+                        segments: const [
+                          ButtonSegment(
+                            value: BandixSortMode.liveSpeed,
+                            icon: Icon(Icons.speed, size: 16),
+                            tooltip: 'Kecepatan Live',
+                          ),
+                          ButtonSegment(
+                            value: BandixSortMode.totalTraffic,
+                            icon: Icon(Icons.data_usage, size: 16),
+                            tooltip: 'Total Kuota',
+                          ),
+                        ],
+                        selected: {_sortMode},
+                        onSelectionChanged: (selected) {
+                          setState(() => _sortMode = selected.first);
+                        },
+                        showSelectedIcon: false,
+                        style: SegmentedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // Device List
+                Expanded(
+                  child: filteredDevices.isEmpty
+                      ? LuciMessageState(
+                          message: _searchQuery.isEmpty
+                              ? l10n.trafficNoRecords
+                              : l10n.noMatchingClients,
+                        )
+                      : _DeviceList(
+                          devices: filteredDevices,
+                          sortMode: _sortMode,
+                        ),
+                ),
+              ],
             );
           },
         ),
@@ -89,107 +209,251 @@ class _TrafficScreenState extends ConsumerState<TrafficScreen> {
   }
 }
 
-class _Records extends ConsumerWidget {
-  const _Records({
-    required this.periods,
-    required this.period,
-    required this.onPeriod,
-  });
+class _WanMetricsHeader extends StatelessWidget {
+  const _WanMetricsHeader({required this.metrics});
 
-  final List<String> periods;
-  final String period;
-  final ValueChanged<String> onPeriod;
+  final BandixMetrics metrics;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final l10n = context.l10n;
-    final async = ref.watch(trafficRecordsProvider(period));
 
-    return Column(
-      children: [
-        if (periods.length > 1)
-          Padding(
-            padding: const EdgeInsets.all(LuciSpacing.md),
-            child: DropdownButtonFormField<String>(
-              initialValue: period,
-              decoration: InputDecoration(
-                labelText: l10n.trafficPeriod,
-                border: const OutlineInputBorder(),
-                isDense: true,
-              ),
-              items: [
-                for (final p in periods)
-                  DropdownMenuItem(value: p, child: Text(p)),
+    return Padding(
+      padding: const EdgeInsets.all(LuciSpacing.md),
+      child: LuciCardStyles.standardCardWrapper(
+        context: context,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.wifi_tethering, color: scheme.primary, size: 20),
+                    const SizedBox(width: LuciSpacing.sm),
+                    Text(
+                      'Bandix Bandwidth Live',
+                      style: LuciTextStyles.cardTitle(context),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          color: Colors.green,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Live (2s)',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: Colors.green,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
-              onChanged: (p) {
-                if (p != null) onPeriod(p);
-              },
             ),
-          ),
-        Expanded(
-          child: async.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(LuciSpacing.md),
-              child: LuciCardSkeleton(contentLines: 5),
+            const SizedBox(height: LuciSpacing.md),
+            Row(
+              children: [
+                Expanded(
+                  child: _rateColumn(
+                    context,
+                    label: l10n.download,
+                    rate: '${formatBytes(metrics.downloadRate)}/s',
+                    total: formatBytes(metrics.downloadTotal),
+                    color: Colors.teal,
+                    icon: Icons.arrow_downward,
+                  ),
+                ),
+                Container(
+                  width: 1,
+                  height: 48,
+                  color: scheme.surfaceContainerHighest,
+                ),
+                Expanded(
+                  child: _rateColumn(
+                    context,
+                    label: l10n.upload,
+                    rate: '${formatBytes(metrics.uploadRate)}/s',
+                    total: formatBytes(metrics.uploadTotal),
+                    color: Colors.deepOrange,
+                    icon: Icons.arrow_upward,
+                  ),
+                ),
+              ],
             ),
-            error: (error, _) => LuciMessageState(
-              message: apiErrorText(context, error),
-              action: l10n.retry,
-              onAction: () => ref.invalidate(trafficRecordsProvider(period)),
-            ),
-            data: (rows) => rows.isEmpty
-                ? LuciMessageState(message: l10n.trafficNoRecords)
-                : _RowList(rows: rows),
-          ),
+          ],
         ),
-      ],
+      ),
+    );
+  }
+
+  Widget _rateColumn(
+    BuildContext context, {
+    required String label,
+    required String rate,
+    required String total,
+    required Color color,
+    required IconData icon,
+  }) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: LuciSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: color),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            rate,
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+          Text(
+            'Total: $total',
+            style: LuciTextStyles.cardSubtitle(context),
+          ),
+        ],
+      ),
     );
   }
 }
 
-class _RowList extends StatelessWidget {
-  const _RowList({required this.rows});
+class _DeviceList extends StatelessWidget {
+  const _DeviceList({required this.devices, required this.sortMode});
 
-  final List<TrafficRow> rows;
+  final List<BandixDevice> devices;
+  final BandixSortMode sortMode;
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final l10n = context.l10n;
-    // Relative bars make "who used the most" readable at a glance in a way
-    // a column of byte counts does not.
-    final biggest = rows.first.totalBytes;
+    final maxMetric = sortMode == BandixSortMode.liveSpeed
+        ? (devices.isEmpty ? 1 : devices.first.totalRate)
+        : (devices.isEmpty ? 1 : devices.first.totalBytes);
 
     return ListView.separated(
       physics: const AlwaysScrollableScrollPhysics(),
-      itemCount: rows.length,
+      itemCount: devices.length,
       separatorBuilder: (_, _) => const Divider(height: 1),
       itemBuilder: (context, i) {
-        final row = rows[i];
-        final scheme = Theme.of(context).colorScheme;
+        final device = devices[i];
+        final ratio = maxMetric > 0
+            ? (sortMode == BandixSortMode.liveSpeed
+                    ? device.totalRate
+                    : device.totalBytes) /
+                maxMetric
+            : 0.0;
+
         return ListTile(
-          title: Text(row.ip.isEmpty ? row.mac : row.ip),
+          key: ValueKey(device.mac.isNotEmpty ? device.mac : device.ip),
+          leading: CircleAvatar(
+            backgroundColor: scheme.primaryContainer.withValues(alpha: 0.3),
+            child: Icon(
+              Icons.devices,
+              color: scheme.primary,
+              size: 20,
+            ),
+          ),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  device.displayName,
+                  style: LuciTextStyles.cardTitle(context),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Text(
+                sortMode == BandixSortMode.liveSpeed
+                    ? '${formatBytes(device.totalRate)}/s'
+                    : formatBytes(device.totalBytes),
+                style: LuciTextStyles.cardTitle(context).copyWith(
+                  color: sortMode == BandixSortMode.liveSpeed && device.totalRate > 0
+                      ? Colors.teal
+                      : null,
+                ),
+              ),
+            ],
+          ),
           subtitle: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '${l10n.download} ${formatBytes(row.rxBytes)} · '
-                '${l10n.upload} ${formatBytes(row.txBytes)}',
+                '${device.ip} · ${device.mac}',
                 style: LuciTextStyles.cardSubtitle(context),
               ),
-              const SizedBox(height: LuciSpacing.xs),
+              const SizedBox(height: 2),
+              Row(
+                children: [
+                  Text(
+                    '↓ ${formatBytes(device.downloadRate)}/s',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: device.downloadRate > 0 ? Colors.teal : Colors.grey,
+                      fontWeight: device.downloadRate > 0 ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '↑ ${formatBytes(device.uploadRate)}/s',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: device.uploadRate > 0 ? Colors.deepOrange : Colors.grey,
+                      fontWeight: device.uploadRate > 0 ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '${l10n.download}: ${formatBytes(device.downloadTotal)}',
+                    style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
               ClipRRect(
                 borderRadius: BorderRadius.circular(2),
                 child: LinearProgressIndicator(
-                  value: biggest == 0 ? 0 : row.totalBytes / biggest,
+                  value: ratio.clamp(0.0, 1.0),
                   minHeight: 4,
                   backgroundColor: scheme.surfaceContainerHighest,
                 ),
               ),
             ],
-          ),
-          trailing: Text(
-            formatBytes(row.totalBytes),
-            style: LuciTextStyles.cardTitle(context),
           ),
         );
       },

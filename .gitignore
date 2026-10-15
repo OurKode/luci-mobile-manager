@@ -13,6 +13,7 @@
 migrate_working_dir/
 .github/copilot-instructions.md
 AGENTS.md
+.codegraph/
 
 # IntelliJ related
 *.iml

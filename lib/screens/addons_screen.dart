@@ -23,7 +23,7 @@ class AddonsScreen extends ConsumerWidget {
     Addon.adblock: Icons.block,
     Addon.upnp: Icons.settings_input_antenna,
     Addon.ddns: Icons.dns_outlined,
-    Addon.nlbwmon: Icons.data_usage,
+    Addon.bandix: Icons.data_usage,
   };
 
   @override
@@ -60,12 +60,12 @@ class AddonsScreen extends ConsumerWidget {
                   scheme: scheme,
                   open: () => AddonScreen(spec: spec),
                 ),
-              // Traffic history is a read-only view, not a form, so it has
+              // Bandix traffic monitor is a live view, not a form, so it has
               // no spec — but it belongs in the same list.
               _tile(
                 context,
                 ref,
-                addon: Addon.nlbwmon,
+                addon: Addon.bandix,
                 title: l10n.trafficHistory,
                 subtitle: l10n.trafficHistorySubtitle,
                 scheme: scheme,

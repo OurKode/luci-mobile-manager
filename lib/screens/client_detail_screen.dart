@@ -89,6 +89,8 @@ class _ClientDetailScreenState extends ConsumerState<ClientDetailScreen> {
             if (!_isOwnedBySelectedRouter) _crossRouterBanner(context),
             const SizedBox(height: LuciSpacing.md),
             ...detailAsync.when(
+              skipLoadingOnReload: true,
+              skipLoadingOnRefresh: true,
               loading: () => const [
                 LuciCardSkeleton(contentLines: 3),
                 SizedBox(height: LuciSpacing.md),

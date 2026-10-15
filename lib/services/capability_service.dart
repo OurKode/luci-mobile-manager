@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import 'package:luci_mobile/models/router_capabilities.dart';
+import 'package:luci_mobile/services/bandix_service.dart';
 import 'package:luci_mobile/services/interfaces/api_service_interface.dart';
 import 'package:luci_mobile/state/router_session.dart';
 import 'package:luci_mobile/utils/logger.dart';
@@ -39,7 +40,7 @@ class CapabilityService {
     'sqm',
     'ddns',
     'adblock',
-    'nlbwmon',
+    'bandix',
     'upnpd',
     'openvpn',
     // `luci-app-wol` ships this; without it in the list the wake control
@@ -124,11 +125,21 @@ class CapabilityService {
       unprobed = fallback?.unprobed ?? const {};
     }
 
+    final bandixAvailable = session.reviewerMode ||
+        configs.contains('bandix') ||
+        (acl != null && acl.containsKey('luci.bandix')) ||
+        await BandixService().isAvailable(
+          session.ipAddress,
+          api: _api,
+          session: session,
+        );
+
     return RouterCapabilities(
       uciConfigs: configs.toSet(),
       features: features ?? const <String, dynamic>{},
       ubusAcl: acl,
       unprobedFunctions: unprobed,
+      bandixAvailable: bandixAvailable,
       probedAt: _clock(),
     );
   }

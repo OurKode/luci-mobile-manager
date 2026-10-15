@@ -595,6 +595,12 @@ class MockApiService implements IApiService {
           {'stdout': '', 'stderr': '', 'code': 0},
         ];
 
+      case 'file.read':
+        return [
+          0,
+          {'data': '48500\n'},
+        ];
+
       case 'luci-rpc.getDHCPLeases':
         // DHCP leases data
         return [
@@ -1373,6 +1379,7 @@ class MockApiService implements IApiService {
     // is not a screen of greyed-out rows, which reads as broken.
     return const [
       'adblock',
+      'bandix',
       'dhcp',
       'dropbear',
       'firewall',
